@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  # 1. The Database (Cold Storage & Settlement)
+  postgres:
+    image: postgres:15-alpine
+    container_name: hft-postgres
+    environment:
+      POSTGRES_USER: trading_user
+      POSTGRES_PASSWORD: super_secret_password
+      POSTGRES_DB: trading_engine
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+
+  # 2. The In-Memory Risk Engine (Balance Locks)
+  redis:
+    image: redis:7-alpine
+    container_name: hft-redis
+    ports:
+      - "6379:6379"
+
+  # 3. The Sequencer (Kafka-Compatible Write-Ahead Log)
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: hft-redpanda
+    command:
+      - redpanda start
+      - --smp 1  # Restrict to 1 CPU core for local dev
+      - --mode dev-container
+      - --kafka-addr internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr internal://redpanda:9092,external://localhost:19092
+    ports:
+      - "19092:19092" # External port for your local machine to inspect topics
+      - "9644:9644"   # Admin API
+
+  # ==========================================
+  # YOUR CUSTOM MICROSERVICES
+  # ==========================================
+
+  # 4. The API Gateway (Handles Web Requests & Redis Locks)
+  api-gateway:
+    build: ./api-gateway # Looks for a Dockerfile in the /api-gateway folder
+    container_name: hft-api-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - REDIS_URL=redis:6379
+      - KAFKA_BROKER=redpanda:9092
+    depends_on:
+      - redis
+      - redpanda
+
+  # 5. The Core Matching Engine (In-Memory Limit Order Book)
+  matching-engine:
+    build: ./matching-engine # Looks for a Dockerfile in the /matching-engine folder
+    container_name: hft-matching-engine
+    environment:
+      - KAFKA_BROKER=redpanda:9092
+    depends_on:
+      - redpanda
+
+  # 6. The Background Settler (Async Database Writes)
+  # settler:
+  #   build: ./settler # Looks for a Dockerfile in the /settler folder
+  #   container_name: hft-settler
+  #   environment:
+  #     - KAFKA_BROKER=redpanda:9092
+  #     - DB_URL=postgres://trading_user:super_secret_password@postgres:5432/trading_engine
+  #     - REDIS_URL=redis:6379
+  #   depends_on:
+  #     - postgres
+  #     - redpanda
+  #     - redis
+
+# Persist database data even if the containers are destroyed
+volumes:
+  pg_data:
