@@ -13,6 +13,7 @@ services:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
 
   # 2. The In-Memory Risk Engine (Balance Locks)
   redis:
