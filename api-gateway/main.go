@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -15,6 +16,7 @@ import (
 type Order struct {
 	ID       string `json:"id"`
 	UserID   string `json:"user_id"`
+	Ticker   string `json:"ticker"`
 	Side     string `json:"side"` // "Buy" or "Sell"
 	Price    uint64 `json:"price"` // In cents
 	Quantity uint64 `json:"quantity"`
@@ -44,14 +46,26 @@ var kafkaWriter *kafka.Writer
 func main() {
 	fmt.Println("Starting API Gateway & Risk Engine...")
 
+	// 1. UPDATE THIS: Read from the Docker environment variable
+	redisAddr := os.Getenv("REDIS_URL")
+	if redisAddr == "" {
+		redisAddr = "redis:6379" // Fallback
+	}
+
 	// Connect to Redis (from our Docker Compose)
 	rdb = redis.NewClient(&redis.Options{
-		Addr: "localhost:6379",
+		Addr: redisAddr,
 	})
+
+	// 2. UPDATE THIS: Read Kafka broker from environment
+	kafkaAddr := os.Getenv("KAFKA_BROKER")
+	if kafkaAddr == "" {
+		kafkaAddr = "redpanda:9092" // Fallback
+	}
 
 	// Connect to Kafka / Redpanda
 	kafkaWriter = &kafka.Writer{
-		Addr:     kafka.TCP("localhost:19092"),
+		Addr:     kafka.TCP(kafkaAddr),
 		Topic:    "orders.aapl",
 		Balancer: &kafka.LeastBytes{},
 	}
@@ -83,7 +97,8 @@ func handlePlaceOrder(c *gin.Context) {
 	// This happens in <1 millisecond
 	result, err := rdb.Eval(ctx, riskEngineScript, []string{availableKey, holdKey}, tradeCost).Result()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Risk engine failure"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Risk engine failure", 
+            "details": err.Error(),})
 		return
 	}
 
@@ -105,6 +120,17 @@ func handlePlaceOrder(c *gin.Context) {
 	)
 
 	if err != nil {
+		// --- NEW COMPENSATION LOGIC ---
+		fmt.Printf("Kafka failed! Rolling back Redis for user %s\n", order.UserID)
+		
+		// Move money back: Decrease Hold, Increase Available
+		rollbackScript := `
+			redis.call('DECRBY', KEYS[2], ARGV[1])
+			redis.call('INCRBY', KEYS[1], ARGV[1])
+			return 1
+		`
+		rdb.Eval(ctx, rollbackScript, []string{availableKey, holdKey}, tradeCost)
+		
 		// DANGER: We locked the funds, but Kafka failed! 
 		// In a production system, you would unlock the funds in Redis here before returning the error.
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to sequence order"})

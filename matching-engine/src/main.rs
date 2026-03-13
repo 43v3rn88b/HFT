@@ -8,6 +8,7 @@ use rdkafka::ClientConfig;
 use rdkafka::Message;
 use std::sync::mpsc::Sender;
 use tokio;
+use std::env;
 use crate::engine::types::EngineCommand;
 // Assuming `EngineCommand` and `spawn_matching_engine()` are imported from your engine module
 //  use crate::engine::{EngineCommand, spawn_matching_engine};
@@ -21,10 +22,15 @@ async fn main() {
     // 1. Boot up the CPU-bound matching engine on its own OS thread
     let engine_tx: Sender<EngineCommand> = spawn_matching_engine();
 
+    // --- NEW LOGIC: Read Kafka Broker from Environment ---
+    // Read the variable from docker-compose.yml or default to the service name
+    let kafka_broker = env::var("KAFKA_BROKER").unwrap_or_else(|_| "redpanda:9092".to_string());
+    println!("Connecting to Kafka Broker: {}", kafka_broker);
+
     // 2. Configure the Kafka Consumer
     let consumer: StreamConsumer = ClientConfig::new()
         .set("group.id", "matching-engine-group")
-        .set("bootstrap.servers", "localhost:19092") // Connects to Redpanda from our Docker Compose
+        .set("bootstrap.servers", &kafka_broker) // Connects to Redpanda from our Docker Compose
         .set("enable.partition.eof", "false")
         .set("session.timeout.ms", "6000")
         .set("enable.auto.commit", "true") // In a real HFT, you'd commit manually AFTER matching
