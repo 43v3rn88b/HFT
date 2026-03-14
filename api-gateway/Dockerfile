@@ -12,7 +12,7 @@ RUN go mod download
 COPY . .
 
 # Build the binary (CGO_ENABLED=0 ensures a static binary that runs anywhere)
-RUN CGO_ENABLED=0 GOOS=linux go build -o api-gateway main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -o api-gateway .
 
 # Stage 2: Create the tiny production image
 FROM alpine:latest
