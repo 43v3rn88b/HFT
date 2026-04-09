@@ -6,115 +6,107 @@
     <title>HFT Live Order Book</title>
     <style>
         body {
-            background-color: #121212;
-            color: #ffffff;
-            font-family: 'Courier New', Courier, monospace;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #0d1117;
+            color: #c9d1d9;
             display: flex;
-            justify-content: center;
-            padding-top: 50px;
+            flex-direction: column;
+            align-items: center;
+            margin-top: 50px;
+        }
+        h1 { margin-bottom: 5px; }
+        #status {
+            font-size: 0.9em;
+            color: #8b949e;
+            margin-bottom: 30px;
         }
         .container {
-            width: 600px;
-            text-align: center;
-        }
-        .book {
             display: flex;
-            justify-content: space-between;
-            margin-top: 20px;
+            gap: 40px;
+            background: #161b22;
+            padding: 20px 40px;
+            border-radius: 10px;
+            border: 1px solid #30363d;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
         }
-        .side {
-            width: 45%;
-            background: #1e1e1e;
-            padding: 15px;
-            border-radius: 8px;
-        }
-        h2 { margin-top: 0; font-size: 1.2rem; }
-        .bids h2 { color: #00ff88; } /* Green for Buyers */
-        .asks h2 { color: #ff3366; } /* Red for Sellers */
-        
+        .column { width: 250px; }
+        h3 { text-align: center; border-bottom: 1px solid #30363d; padding-bottom: 10px; }
         table { width: 100%; border-collapse: collapse; }
-        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #333; }
-        th { color: #888; font-size: 0.9rem; }
+        th, td { padding: 8px; text-align: right; }
+        th { color: #8b949e; font-size: 0.85em; font-weight: normal; }
+        th:first-child, td:first-child { text-align: left; }
         
-        #status {
-            color: #aaa;
-            margin-bottom: 20px;
-            font-size: 0.9rem;
-        }
+        /* Exchange Colors */
+        .bid-row td { color: #3fb950; font-weight: bold; } /* Green for Bids */
+        .ask-row td { color: #f85149; font-weight: bold; } /* Red for Asks */
+        .empty-state { text-align: center; color: #8b949e; font-style: italic; }
     </style>
 </head>
 <body>
 
-<div class="container">
-    <h1>AAPL Order Book</h1>
+    <h1 id="ticker-header">Loading Ticker...</h1>
     <div id="status">🔴 Disconnected</div>
 
-    <div class="book">
-        <div class="side bids">
-            <h2>Bids (Buy)</h2>
+    <div class="container">
+        <div class="column">
+            <h3>Bids (Buy)</h3>
             <table>
-                <thead><tr><th>Size</th><th>Price</th></tr></thead>
+                <thead><tr><th>Size</th><th>Price ($)</th></tr></thead>
                 <tbody id="bids-body">
-                    </tbody>
+                    <tr><td colspan="2" class="empty-state">Waiting for data...</td></tr>
+                </tbody>
             </table>
         </div>
 
-        <div class="side asks">
-            <h2>Asks (Sell)</h2>
+        <div class="column">
+            <h3>Asks (Sell)</h3>
             <table>
-                <thead><tr><th>Price</th><th>Size</th></tr></thead>
+                <thead><tr><th>Price ($)</th><th>Size</th></tr></thead>
                 <tbody id="asks-body">
-                    </tbody>
+                    <tr><td colspan="2" class="empty-state">Waiting for data...</td></tr>
+                </tbody>
             </table>
         </div>
     </div>
-</div>
 
-<script>
-    // 1. Connect to your Go API Gateway WebSocket
-    const ws = new WebSocket('ws://localhost:8080/ws/orderbook');
-    const statusEl = document.getElementById('status');
-    const bidsBody = document.getElementById('bids-body');
-    const asksBody = document.getElementById('asks-body');
+    <script>
+        // Connect to your Go API Gateway
+        const ws = new WebSocket("ws://172.30.85.187:8082/ws/orderbook");
+        const statusEl = document.getElementById("status");
+        const tickerEl = document.getElementById("ticker-header");
+        const bidsBody = document.getElementById("bids-body");
+        const asksBody = document.getElementById("asks-body");
 
-    // 2. Handle Connection Events
-    ws.onopen = () => {
-        statusEl.innerHTML = '🟢 Connected to Redpanda Stream';
-        statusEl.style.color = '#00ff88';
-    };
+        ws.onopen = () => {
+            statusEl.innerHTML = "🟢 Connected to Go Gateway";
+        };
 
-    ws.onclose = () => {
-        statusEl.innerHTML = '🔴 Disconnected';
-        statusEl.style.color = '#ff3366';
-    };
+        ws.onclose = () => {
+            statusEl.innerHTML = "🔴 Disconnected. Is the Go server running?";
+        };
 
-    // 3. Handle Incoming Messages from Go
-    ws.onmessage = (event) => {
-        try {
+        ws.onmessage = (event) => {
             const data = JSON.parse(event.data);
-            
-            // Clear current book
-            bidsBody.innerHTML = '';
-            asksBody.innerHTML = '';
+            tickerEl.innerText = `${data.ticker} Order Book`;
 
-            // Render Bids
-            if (data.bids) {
-                data.bids.forEach(bid => {
-                    bidsBody.innerHTML += `<tr><td>${bid.qty}</td><td>$${(bid.price / 100).toFixed(2)}</td></tr>`;
-                });
-            }
+            // Helper function to render rows
+            const renderRows = (levels, type) => {
+                if (!levels || levels.length === 0) {
+                    return `<tr><td colspan="2" class="empty-state">No ${type}</td></tr>`;
+                }
+                return levels.map(level => {
+                    const priceFormatted = (level.price / 100).toFixed(2); // Convert cents to dollars
+                    if (type === 'bids') {
+                        return `<tr class="bid-row"><td>${level.qty}</td><td>${priceFormatted}</td></tr>`;
+                    } else {
+                        return `<tr class="ask-row"><td>${priceFormatted}</td><td>${level.qty}</td></tr>`;
+                    }
+                }).join('');
+            };
 
-            // Render Asks
-            if (data.asks) {
-                data.asks.forEach(ask => {
-                    asksBody.innerHTML += `<tr><td>$${(ask.price / 100).toFixed(2)}</td><td>${ask.qty}</td></tr>`;
-                });
-            }
-        } catch (e) {
-            console.error("Error parsing message:", e);
-        }
-    };
-</script>
-
+            bidsBody.innerHTML = renderRows(data.bids, 'bids');
+            asksBody.innerHTML = renderRows(data.asks, 'asks');
+        };
+    </script>
 </body>
 </html>

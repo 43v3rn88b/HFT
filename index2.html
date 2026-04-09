@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HFT Live Order Book</title>
+    <style>
+        body {
+            background-color: #121212;
+            color: #ffffff;
+            font-family: 'Courier New', Courier, monospace;
+            display: flex;
+            justify-content: center;
+            padding-top: 50px;
+        }
+        .container {
+            width: 600px;
+            text-align: center;
+        }
+        .book {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 20px;
+        }
+        .side {
+            width: 45%;
+            background: #1e1e1e;
+            padding: 15px;
+            border-radius: 8px;
+        }
+        h2 { margin-top: 0; font-size: 1.2rem; }
+        .bids h2 { color: #00ff88; } /* Green for Buyers */
+        .asks h2 { color: #ff3366; } /* Red for Sellers */
+        
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #333; }
+        th { color: #888; font-size: 0.9rem; }
+        
+        #status {
+            color: #aaa;
+            margin-bottom: 20px;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>AAPL Order Book</h1>
+    <div id="status">🔴 Disconnected</div>
+
+    <div class="book">
+        <div class="side bids">
+            <h2>Bids (Buy)</h2>
+            <table>
+                <thead><tr><th>Size</th><th>Price</th></tr></thead>
+                <tbody id="bids-body">
+                    </tbody>
+            </table>
+        </div>
+
+        <div class="side asks">
+            <h2>Asks (Sell)</h2>
+            <table>
+                <thead><tr><th>Price</th><th>Size</th></tr></thead>
+                <tbody id="asks-body">
+                    </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+    // 1. Connect to your Go API Gateway WebSocket
+    const ws = new WebSocket('ws://localhost:8082/ws/orderbook');
+    const statusEl = document.getElementById('status');
+    const bidsBody = document.getElementById('bids-body');
+    const asksBody = document.getElementById('asks-body');
+
+    // 2. Handle Connection Events
+    ws.onopen = () => {
+        statusEl.innerHTML = '🟢 Connected to Redpanda Stream';
+        statusEl.style.color = '#00ff88';
+    };
+
+    ws.onclose = () => {
+        statusEl.innerHTML = '🔴 Disconnected';
+        statusEl.style.color = '#ff3366';
+    };
+
+    // 3. Handle Incoming Messages from Go
+    ws.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            
+            // Clear current book
+            bidsBody.innerHTML = '';
+            asksBody.innerHTML = '';
+
+            // Render Bids
+            if (data.bids) {
+                data.bids.forEach(bid => {
+                    bidsBody.innerHTML += `<tr><td>${bid.qty}</td><td>$${(bid.price / 100).toFixed(2)}</td></tr>`;
+                });
+            }
+
+            // Render Asks
+            if (data.asks) {
+                data.asks.forEach(ask => {
+                    asksBody.innerHTML += `<tr><td>$${(ask.price / 100).toFixed(2)}</td><td>${ask.qty}</td></tr>`;
+                });
+            }
+        } catch (e) {
+            console.error("Error parsing message:", e);
+        }
+    };
+</script>
+
+</body>
+</html>

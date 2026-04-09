@@ -40,7 +40,11 @@ services:
     ports:
       - "19092:19092" # External port for your local machine to inspect topics
       - "9644:9644"   # Admin API
-
+    healthcheck:
+      test: ["CMD", "rpk", "cluster", "info"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
   # ==========================================
   # YOUR CUSTOM MICROSERVICES
   # ==========================================
@@ -65,7 +69,8 @@ services:
     environment:
       - KAFKA_BROKER=redpanda:9092
     depends_on:
-      - redpanda
+      redpanda:
+        condition: service_healthy
 
   # 6. The Background Settler (Async Database Writes)
   settler:
@@ -74,7 +79,8 @@ services:
     environment:
       - KAFKA_BROKER=redpanda:9092
       - DB_URL=postgres://trading_user:super_secret_password@postgres:5432/trading_engine?sslmode=disable
-      - REDIS_URL=redis:6379
+      # - REDIS_URL=redis:6379
+      - REDIS_ADDR=redis:6379
     depends_on:
       postgres:
         condition: service_healthy # This ensures the settler waits for the healthcheck

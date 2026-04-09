@@ -1,59 +1,37 @@
-mod engine; // Tells Rust to look for the engine folder
+mod engine;
 
-use engine::types::{Order, Trade, EngineCommand};
+use engine::types::{Order, Trade, EngineCommand, IncomingCommand};
 use engine::spawn_matching_engine; 
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::ClientConfig;
 use rdkafka::Message;
-use std::sync::mpsc::{channel, Sender, Receiver}; // Fixed imports here
+use std::sync::mpsc::{channel, Sender, Receiver};
 use tokio;
 use std::env; 
 use std::time::Duration;
+use crate::engine::types::CancelOrderRequest;
+use rdkafka::util::Timeout; // <-- ADD THIS
 
 #[tokio::main]
 async fn main() {
-    
     println!("Booting up High-Frequency Trading System...");
 
-    // 1. Boot up the CPU-bound matching engine on its own OS thread
-    // let engine_tx: Sender<EngineCommand> = spawn_matching_engine(std::sync::mpsc::Sender<Trade>);
-
-    // --- NEW LOGIC: Read Kafka Broker from Environment ---
-    // Read the variable from docker-compose.yml or default to the service name
     let kafka_broker = env::var("KAFKA_BROKER").unwrap_or_else(|_| "redpanda:9092".to_string());
     println!("Connecting to Kafka Broker: {}", kafka_broker);
 
-    // 1. Create the Producer that will publish Trades
+    // 1. Create Producers
     let trade_producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &kafka_broker)
         .set("message.timeout.ms", "5000")
         .create()
         .expect("Failed to create Trade producer");
 
-    // 2. Create the Return Channel from the Engine
-    let (trade_tx, trade_rx): (Sender<Trade>, Receiver<Trade>) = channel();
-
-    // 3. Boot up the CPU-bound matching engine, passing it the return channel
-    let engine_tx: Sender<EngineCommand> = spawn_matching_engine(trade_tx);
-
-    // 4. Spawn a dedicated async task just to publish trades to Kafka
-    // This runs independently so it never blocks incoming orders!
-    tokio::spawn(async move {
-        loop {
-            // Wait for a trade from the engine
-            if let Ok(trade) = trade_rx.recv() {
-                println!("✅ Match found! Publishing Trade to Redpanda: {:?}", trade);
-                
-                let payload = serde_json::to_string(&trade).unwrap();
-                let record = FutureRecord::to("trades.aapl")
-                    .payload(&payload)
-                    .key(&trade.ticker); // Keying by ticker ensures ordered processing
-                    
-                let _ = trade_producer.send(record, Duration::from_secs(0)).await;
-            }
-        }
-    });
+    let snapshot_producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &kafka_broker)
+        .set("message.timeout.ms", "5000")
+        .create()
+        .expect("Failed to create Snapshot producer");
 
     let dlq_producer: FutureProducer = ClientConfig::new()
         .set("bootstrap.servers", &kafka_broker)
@@ -61,57 +39,105 @@ async fn main() {
         .create()
         .expect("Failed to create DLQ producer");
 
-    // 2. Configure the Kafka Consumer
+    // 2. Setup Channels
+    let (trade_tx, trade_rx): (Sender<Trade>, Receiver<Trade>) = channel();
+    let (snap_tx, snap_rx): (Sender<String>, Receiver<String>) = channel();
+
+    // 3. Boot up the Engine
+    let engine_tx: Sender<EngineCommand> = spawn_matching_engine(trade_tx, snap_tx);
+
+    // 4. Task: Publish Trades
+    tokio::spawn(async move {
+        while let Ok(trade) = trade_rx.recv() {
+            // LOUD PRINT: This confirms the engine actually matched something
+            println!("💰 MATCH EXECUTED: {} shares of {} at ${}", trade.quantity, trade.ticker, trade.price);
+
+            let payload = serde_json::to_string(&trade).unwrap();
+            let _ = trade_producer.send(
+                FutureRecord::to("trades.aapl").payload(&payload).key(&trade.ticker),
+                Duration::from_secs(0)
+            ).await;
+        }
+    });
+
+    // 5. Task: Publish OrderBook Snapshots
+    tokio::spawn(async move {
+        while let Ok(snapshot_json) = snap_rx.recv() {
+            let _ = snapshot_producer.send(
+                FutureRecord::to("snapshots.aapl").payload(&snapshot_json).key("AAPL"),
+                Duration::from_secs(0)
+            ).await;
+        }
+    });
+
+    // 6. Consumer Loop
     let consumer: StreamConsumer = ClientConfig::new()
-        .set("group.id", "matching-engine-group")
-        .set("bootstrap.servers", &kafka_broker) // Connects to Redpanda from our Docker Compose
-        .set("enable.partition.eof", "false")
-        .set("session.timeout.ms", "6000")
-        .set("enable.auto.commit", "true") // In a real HFT, you'd commit manually AFTER matching
+        .set("group.id", "matching-engine-group-2")
+        .set("bootstrap.servers", &kafka_broker)
+        .set("enable.auto.commit", "true")
+        .set("auto.offset.reset", "earliest")
         .create()
         .expect("Failed to create Kafka consumer");
 
-    // 3. Subscribe to the orders topic for Apple stock
-    consumer.subscribe(&["orders.aapl"])
-        .expect("Can't subscribe to specified topic");
+    consumer.subscribe(&["orders.aapl"]).expect("Subscription failed");
 
+
+    
+    
     println!("🎧 Kafka Consumer listening on 'orders.aapl'...");
-
-    // 4. The Async Event Loop (I/O Bound)
     loop {
-        // Wait asynchronously for a message from Kafka. 
-        // This does NOT block our Engine thread!
         match consumer.recv().await {
-            Err(e) => eprintln!("Kafka error: {}", e),
             Ok(msg) => {
-                // Extract the JSON payload bytes
+                // Get the topic name to route the message correctly
+                let topic = msg.topic();
+
                 if let Some(payload) = msg.payload() {
+                    // 1. Parse the incoming order
+                    let order: Order = serde_json::from_slice(payload).unwrap();
                     
-                    // Parse the JSON into our Rust `Order` struct
-                    match serde_json::from_slice::<Order>(payload) {
-                        Ok(order) => {
-                            // Send it to the blazing-fast Engine thread
-                            if let Err(e) = engine_tx.send(EngineCommand::PlaceOrder(order)) {
-                                eprintln!("Fatal error: Engine channel disconnected! {}", e);
-                                break;
+                    match topic {
+                        // 🟢 Topic for New Orders
+                        "orders.aapl" => {
+                           // Try to parse. If it fails, YELL LOUDLY.
+                            match serde_json::from_slice::<IncomingCommand>(payload) {
+                                Ok(command) => {
+                                    match command {
+                                        IncomingCommand::Place(order) => {
+                                            println!("✅ PLACE COMMAND: ID: {}, Side: {:?}", order.id, order.side);
+                                            let _ = engine_tx.send(EngineCommand::PlaceOrder(order));
+                                        },
+                                        IncomingCommand::Cancel { id, ticker, .. } => {
+                                            println!("🗑️ Engine routing cancel request for: {}", id);
+                                            let _ = engine_tx.send(EngineCommand::CancelOrder { ticker, id });
+                                        }
+                                    }
+                                },
+                                Err(e) => {
+                                    // THIS will save you hours of debugging in the future!
+                                    let raw_json = String::from_utf8_lossy(payload);
+                                    eprintln!("❌ JSON PARSE FAILED: {} | Raw Payload: {}", e, raw_json);
+                                }
                             }
-                        }
-                        Err(e) => {
-                            eprintln!("Invalid JSON received from Kafka: {}", e);
-                            // Drop it or send to a Dead Letter Queue (DLQ)
-                            eprintln!("Invalid JSON received. Moving to DLQ: {}", e);
-                            
-                            // Create a record targeting our new DLQ topic
-                            let record = FutureRecord::to("orders.aapl.dlq")
-                                .payload(payload)
-                                .key("invalid-format");
-                                
-                            // Send it asynchronously without blocking the main event loop
-                            let _ = dlq_producer.send(record, Duration::from_secs(0)).await;
-                        }
+                        },
+                        _ => println!("❓ Received message from unknown topic: {}", topic),
+                
+                        
+                        // Err(e) => {
+                        //     // 1. Log the exact reason why parsing failed
+                        //     eprintln!("❌ PARSE FAILURE: {} | Raw: {}", e, raw_string);
+
+                        //     // 2. Move the original payload to the DLQ so it doesn't block the engine
+                        //     let _ = dlq_producer.send(
+                        //         FutureRecord::to("orders.aapl.dlq")
+                        //             .payload(payload)
+                        //             .key("invalid"),
+                        //         Duration::from_secs(0)
+                        //     ).await;
+                        // }
                     }
                 }
             }
+            Err(e) => eprintln!("Kafka error: {}", e),
         }
     }
 }

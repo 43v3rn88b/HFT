@@ -1,5 +1,7 @@
 use crate::engine::types::*; // Import your types
 use std::collections::{BTreeMap, HashMap};
+use std::collections::HashSet;
+
 pub struct LimitOrderBook {
     pub ticker: String,
     // Asks (Sellers): Sorted lowest to highest.
@@ -8,6 +10,7 @@ pub struct LimitOrderBook {
     pub bids: BTreeMap<u64, PriceLevel>, 
     // O(1) Lookup table for cancellations: OrderID -> Price
     pub order_index: HashMap<String, u64>, 
+    pub canceled_orders: HashSet<String>,
 }
 
 // spawn_matching_engine();
@@ -19,9 +22,57 @@ impl LimitOrderBook {
             asks: BTreeMap::new(),
             bids: BTreeMap::new(),
             order_index: HashMap::new(),
+            canceled_orders: HashSet::new(),
         }
     }
 
+    pub fn take_snapshot(&self) -> OrderBookSnapshot {
+        let mut bids = Vec::new();
+        // Bids are highest-price first, so we reverse the BTreeMap
+        for (&price, level) in self.bids.iter().rev().take(10) {
+            bids.push(SnapshotLevel { price, qty: level.total_qty });
+        }
+
+        let mut asks = Vec::new();
+        // Asks are lowest-price first, so normal iteration is fine
+        for (&price, level) in self.asks.iter().take(10) {
+            asks.push(SnapshotLevel { price, qty: level.total_qty });
+        }
+
+        OrderBookSnapshot {
+            ticker: self.ticker.clone(),
+            bids,
+            asks,
+        }
+    }
+
+    pub fn cancel_order(&mut self, order_id: String) {
+        self.canceled_orders.insert(order_id);
+        println!("🗑️ Order {} added to graveyard.", order_id);
+    }
+
+    // Returns true if the order was found and removed
+    pub fn cancel_order(&mut self, ticker: &str, order_id: &str) -> bool {
+        let book = match self.orderbooks.get_mut(ticker) {
+            Some(b) => b,
+            None => return false,
+        };
+
+        let mut removed = false;
+
+        // Example removal logic (adjust based on your exact BTreeMap/Vec structure)
+        // 1. Try removing from Bids
+        if book.bids.remove_order(order_id) {
+            removed = true;
+        } 
+        // 2. If not in Bids, try Asks
+        else if book.asks.remove_order(order_id) {
+            removed = true;
+        }
+
+        removed
+    }
+    
     /// The O(1) Cancellation Method
     pub fn cancel_order(&mut self, order_id: &str, side: Side) -> Result<(), &'static str> {
         // 1. Find the price level in O(1) time
